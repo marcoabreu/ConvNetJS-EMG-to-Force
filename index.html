@@ -1,0 +1,513 @@
+<html>
+<head>
+<meta charset="utf-8" />
+  <title>EMG to Force - Train Neural Network</title>
+  <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.8.2/jquery.min.js"></script>
+  <script src="http://evanplaice.github.io/jquery-csv/src/jquery.csv.js"></script>
+  <script src="http://netdna.bootstrapcdn.com/bootstrap/3.1.1/js/bootstrap.min.js"></script>
+  <link href="http://netdna.bootstrapcdn.com/bootstrap/3.1.1/css/bootstrap.min.css" rel="stylesheet">
+
+  <script src="https://unpkg.com/simple-statistics@2.1.0/dist/simple-statistics.js"></script>
+  <script src="http://cdn.jsdelivr.net/jstat/latest/jstat.min.js"></script>
+  <script src="http://cs.stanford.edu/people/karpathy/convnetjs/build/convnet.js"></script>
+
+  <link href="css/bootstrap-formhelpers.min.css" rel="stylesheet">
+  <script src="js/bootstrap-formhelpers.min.js"></script>
+  <script src="js/style.js"></script>
+
+  <script src="js/fft.js"></script>
+  <script src="js/vis.js"></script>
+  <script src="js/util.js"></script>
+</head>
+
+<body>
+   <div class="container">
+    <div class="row">
+      <div class="col-lg-8 col-sm-12 col-12">
+          <h4>Input:</h4>
+          <div class="input-group">
+              <label class="input-group-btn">
+                  <span class="btn btn-primary">
+                      Browse&hellip; <input id="files" type="file" style="display: none;" name="files[]" multiple>
+                  </span>
+              </label>
+              <input type="text" class="form-control" readonly>
+          </div>
+          <span class="help-block">
+              Select a cvs file to train the network
+          </span>
+      </div>
+    </div>
+
+    <div class="row">
+     <div class="col-lg-8 col-sm-12 col-12">
+	<div class="form-group">
+	  <label for="InitializeNeural">Instantiate a Network and Trainer:</label>
+	  <textarea class="form-control" rows="15" id="newnet"></textarea>
+          <button id="buttonnn" type="button" class="btn btn-primary disabled" onclick="change_net()">Initialize network</button>
+	</div>
+     </div>
+    </div>
+    
+    <div class="row">
+      <div class="col-lg-8 col-sm-12 col-12">
+        <h4>Result:</h4> 
+        <div id="report">Report...</div>
+	<div id="accuracy">Accuracy...</div>
+      </div>
+    </div>
+      <br/>
+      <div class="row">
+        <div class="col-lg-6 col-sm-12 col-12">
+	    Loss:
+            <canvas id="lossgraph" width="400" height="300">
+              Sorry, your browser doesn't support the &lt;canvas&gt; element.
+            </canvas>
+        </div> 
+        <div class="col-lg-6 col-sm-12 col-12">
+	    Accuracy (100):
+	    <canvas id="acc100" width="400" height="300">
+              Sorry, your browser doesn't support the &lt;canvas&gt; element.
+            </canvas>
+        </div>
+      </div>
+
+
+      <div class="row">
+        <div class="col-lg-6 col-sm-12 col-12">
+	    Accuracy (1000):
+            <canvas id="acc1000" width="400" height="300">
+              Sorry, your browser doesn't support the &lt;canvas&gt; element.
+            </canvas>
+        </div> 
+        <div class="col-lg-6 col-sm-12 col-12">
+	    Accuracy (5000):
+	    <canvas id="accMax" width="400" height="300">
+              Sorry, your browser doesn't support the &lt;canvas&gt; element.
+            </canvas>
+        </div>
+      </div>
+
+     <div class="row">
+      <div class="col-lg-8 col-sm-12 col-12">
+      <button id="start" type="button" class="btn btn-primary disabled" onclick="startTrain(30)">Start Training</button>
+      <button id="stop" type="button" class="btn btn-primary disabled" onclick="stopTrain()">Stop Training</button>
+      <button id="save" type="button" class="btn btn-primary disabled" onclick="saveNetwork()">Save Network</button>
+      </div> 
+     <div class="row"> 
+  </div> 
+
+
+  <script>
+
+    var resultQueue = [];
+    var maxResults = 5000;
+
+    var acc100Graph = new cnnvis.Graph();
+    var acc1000Graph = new cnnvis.Graph();
+    var accMaxGraph = new cnnvis.Graph();
+    var lossGraph = new cnnvis.Graph();
+    var accGraph = new cnnvis.Graph();
+    var xLossWindow = new cnnutil.Window(100);
+    var wLossWindow = new cnnutil.Window(100);
+    var trainAccWindow = new cnnutil.Window(100);
+    var f2t = cnnutil.f2t;
+    
+    var dataloaded = false;
+    
+    var batchSize = 15;
+    var noOfIterations = 5;
+    var windowSize = 50;
+
+    var layer_defs = [], net, trainer;
+
+    var t = "\
+    layer_defs.push({type:'input', out_sx:windowSize, out_sy:8, out_depth:1});\n\
+    \n\
+    layer_defs.push({type:'conv', sx:7, filters:16, stride:1, pad:2, activation:'relu'});\n\
+    layer_defs.push({type:'pool', sx:2, stride:2});\n\
+    layer_defs.push({type:'conv', sx:5, filters:32, stride:1, pad:2, activation:'relu'});\n\
+    layer_defs.push({type:'pool', sx:3, stride:3});\n\
+    layer_defs.push({type:'fc', num_neurons:64, activation: 'relu'});\n\
+    \n\
+    layer_defs.push({type:'regression', num_neurons:1});\n\
+    \n\
+    net = new convnetjs.Net();\n\
+    net.makeLayers(layer_defs);\n\
+    \n\
+    trainer = new convnetjs.Trainer(net, {method: 'adadelta', learning_rate: 0.01, l2_decay: 0.001, batch_size: 5})\
+    ";
+
+
+    $(document).ready(function() {
+      if(isAPIAvailable()) {
+        $('#files').bind('change', handleFileSelect);
+      }
+       $("#newnet").val(t);
+       //eval($("#newnet").val());
+    });
+
+    function isAPIAvailable() {
+      // Check for the various File API support.
+      if (window.File && window.FileReader && window.FileList && window.Blob) {
+        // Great success! All the File APIs are supported.
+        return true;
+      } else {
+        // source: File API availability - http://caniuse.com/#feat=fileapi
+        // source: <output> availability - http://html5doctor.com/the-output-element/
+        document.writeln('The HTML5 APIs used in this form are only available in the following browsers:<br />');
+        // 6.0 File API & 13.0 <output>
+        document.writeln(' - Google Chrome: 13.0 or later<br />');
+        // 3.6 File API & 6.0 <output>
+        document.writeln(' - Mozilla Firefox: 6.0 or later<br />');
+        // 10.0 File API & 10.0 <output>
+        document.writeln(' - Internet Explorer: Not supported (partial support expected in 10.0)<br />');
+        // ? File API & 5.1 <output>
+        document.writeln(' - Safari: Not supported<br />');
+        // ? File API & 9.2 <output>
+        document.writeln(' - Opera: Not supported');
+        return false;
+      }
+    }
+
+    function handleFileSelect(evt) {
+      var files = evt.target.files; // FileList object
+      file = files[0];
+
+      // read the file metadata
+      var output = ''
+          output += '<span style="font-weight:bold;">' + escape(file.name) + '</span><br />\n';
+          output += ' - FileType: ' + (file.type || 'n/a') + '<br />\n';
+          output += ' - FileSize: ' + file.size + ' bytes<br />\n';
+          output += ' - LastModified: ' + (file.lastModifiedDate ? file.lastModifiedDate.toLocaleDateString() : 'n/a') + '<br />\n';
+
+      $("#buttonnn").removeClass("disabled")
+    }
+
+    function startTrain(FPS){
+
+    	loadData(file);
+    	
+    	if (dataloaded == true){
+    		console.log('starting!');
+                dataPreProcessing(data,windowSize);
+                sample_training_instance(data,windowSize, batchSize);
+    		trainingInterval = setInterval(tick, 1000/FPS);  // lets go!
+    		totalIterations = 0;
+    		$("#start").addClass("disabled");
+        	$("#stop").removeClass("disabled");
+        	$("#save").addClass("disabled");
+    	}
+    	else{
+    		setTimeout(startTrain, 200); // keep checking
+    		console.log('waiting');
+    	}
+    }
+
+    function tick(){
+        if ( dataloaded == true)
+        {
+                sample_training_instance(data,windowSize, batchSize);
+			//console.log(preprocessedData);
+			//console.log(force);
+                train(file, noOfIterations, windowSize);
+        }
+
+         // log progress to graph, (full loss)
+	if(totalIterations % 100 === 0) {
+		var xa = xLossWindow.get_average();
+		var xw = wLossWindow.get_average();
+		if(xa >= 0 && xw >= 0) { // if they are -1 it means not enough data was accumulated yet for estimates
+			lossGraph.add(totalIterations, xa + xw);
+			lossGraph.drawSelf(document.getElementById("lossgraph"));
+		}
+
+
+		var avg100 = Math.round(calcAvgOfLastElements(100), 1);
+		var avg500 = Math.round(calcAvgOfLastElements(500), 1);
+		var avg1000 = Math.round(calcAvgOfLastElements(1000), 1);
+		var avg2500 = Math.round(calcAvgOfLastElements(2500), 1);
+		var avgMax = Math.round(calcAvgOfLastElements(maxResults), 1);
+		console.log(avg100 + "|" + avg500 + "|" + avg1000 + "|" + avg2500 + "|" + avgMax + " [" + resultQueue.length + "/" + (resultQueue.length * noOfIterations) + "]");
+		$("#accuracy").html("Accuracy:<br/>" + 
+					"100:" + avg100 + "%<br/>" +
+					"500:" + avg500 + "%<br/>" +
+					"1000:" + avg1000 + "%<br/>" +
+					"2500:" + avg2500 + "%<br/>" +
+					maxResults + ":" + avgMax + "%<br/>");			
+
+		acc100Graph.add(totalIterations, avg100);
+		acc100Graph.drawSelf(document.getElementById("acc100"));
+
+		if(totalIterations >= 1000) {
+		    acc1000Graph.add(totalIterations, avg1000);
+		    acc1000Graph.drawSelf(document.getElementById("acc1000"));
+		}
+			
+		if(totalIterations >= maxResults) {
+		    accMaxGraph.add(totalIterations, avgMax);
+		    accMaxGraph.drawSelf(document.getElementById("accMax"));
+		}
+
+	}
+
+    }
+
+    function calcAvgOfLastElements(nbElements) {
+        var realNb = nbElements / noOfIterations;
+	if(realNb > resultQueue.length) {
+	    realNb = resultQueue.length;
+	}
+
+	var targetElements = resultQueue.slice(-1 * realNb);
+
+	var curVal = 0;
+        for (var i = 0; i < targetElements.length; i++) {
+	    curVal += targetElements[i];
+	}
+	var avg = curVal / targetElements.length;
+	return avg;
+    }
+
+    function stopTrain(){
+    	console.log("train stop called");
+      clearInterval(trainingInterval);
+      //$("#start").removeClass("disabled");
+      $("#stop").addClass("disabled");
+      $("#save").removeClass("disabled");
+    }
+
+    function saveNetwork(){
+      // network outputs all of its parameters into json object
+      var json = net.toJSON();
+      // the entire object is now simply string. You can save this somewhere
+      var str = JSON.stringify(json);
+
+      // Store the network
+      var content, MIME_TYPE, theBlob, a;
+
+      // What will actually be put into the file
+      content = str;
+
+      // The file type
+      MIME_TYPE = "text/plain";
+      // Basically, the file itself
+      theBlob = new Blob([content], {type: MIME_TYPE});
+
+      // The anchor element
+      a = document.createElement("a");
+      // Set the name of the file that will be downloaded
+      a.download = "neuralNetwork.txt";
+      // Set the contents to be downloaded
+      a.href = window.URL.createObjectURL(theBlob);
+      // Anchor's text
+      a.textContent = "Download";
+
+      // What's displayed as the URL of the anchor (when hovered, copied, etc.)
+      a.dataset.downloadurl = [MIME_TYPE, a.download, a.href].join(":");
+
+      // Add the anchor to the page
+      document.body.appendChild(a);
+      a.click();
+
+      setTimeout(function(){
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);  
+      }, 100);
+
+    }
+
+    function MapData(input){
+    	//output = output_start + ((output_end - output_start) / (input_end - input_start)) * (input - input_start);
+    	//var output = 0.0 + ((1.0 - 0.0) / (128.0 - -128.0)) * (input - -128);
+    	//var output = 0.0 + ((256.0 - 0.0) / (128.0 - -128.0)) * (input - -128);
+    	//return output;
+    	return input;
+    }
+
+    function loadData(file){
+    	var reader = new FileReader();
+      	reader.readAsText(file);
+      	reader.onload = function(event){
+        var csv = event.target.result;
+        data = $.csv.toArrays(csv);
+        dataloaded = true;
+      };
+      reader.onerror = function(){ alert('Unable to read ' + file.fileName); };
+    }
+
+    function dataPreProcessing (data, windowSize){
+    	
+    	features = [], force = [];
+    	preprocessedData = [];
+    	preprocessedData[0] = [];
+    	preprocessedData[1] = [];
+    	preprocessedData[2] = [];
+    	preprocessedData[3] = [];
+		preprocessedData[4] = [];
+    	preprocessedData[5] = [];
+    	preprocessedData[6] = [];
+    	preprocessedData[7] = [];
+     
+        var dataLength = data.length;
+
+
+        //data preperation
+        Emg1Data = [], Emg2Data = [], Emg3Data = [], Emg4Data = [], Emg5Data = [], Emg6Data = [], Emg7Data = [], Emg8Data = [];
+        for ( var x = 1; x < data.length; x++){
+          Emg1Data.push(+MapData(data[x][0]));
+          Emg2Data.push(+MapData(data[x][1]));
+          Emg3Data.push(+MapData(data[x][2]));
+          Emg4Data.push(+MapData(data[x][3]));
+          Emg5Data.push(+MapData(data[x][4]));
+          Emg6Data.push(+MapData(data[x][5]));
+          Emg7Data.push(+MapData(data[x][6]));
+          Emg8Data.push(+MapData(data[x][7]));
+        }
+         
+    }
+
+    function sample_training_instance(data, windowSize, bachSize){
+		features = [], force = [];
+    	preprocessedData = [];
+    	preprocessedData[0] = [];
+    	preprocessedData[1] = [];
+    	preprocessedData[2] = [];
+    	preprocessedData[3] = [];
+		preprocessedData[4] = [];
+    	preprocessedData[5] = [];
+    	preprocessedData[6] = [];
+    	preprocessedData[7] = [];
+     
+        var dataLength = data.length;
+        var currentEMGWindowStart = +0;
+        var currentEMGWindowEnd = +0;
+
+        // beybda2 men tane wa7ed mesh men awel wa7ed fe kol loop
+        for(var i = 1; i <= bachSize; i++){
+
+        	do{
+        	currentEMGWindowStart = Math.floor(Math.random() * (dataLength - +windowSize - 1) ) ;
+        	currentEMGWindowEnd = currentEMGWindowStart + +windowSize;
+        	}
+        	while (data[currentEMGWindowStart][8] != data[currentEMGWindowEnd][8] || data[currentEMGWindowStart][9] != data[currentEMGWindowEnd][9])
+
+			preprocessedData[0].push(Emg1Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[1].push(Emg2Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[2].push(Emg3Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[3].push(Emg4Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[4].push(Emg5Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[5].push(Emg6Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[6].push(Emg7Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+			preprocessedData[7].push(Emg8Data.slice(currentEMGWindowStart,currentEMGWindowEnd));
+
+			force.push(data[currentEMGWindowStart][8]);
+        }
+    	
+    }
+
+    function saveFeatures(features, force){
+      var csvContent = "data:text/csv;charset=utf-8,";
+      csvContent += "EMG1MeanFreq, EMG1Mean, EMG1Median, EMG1StdDev, EMG1Variance, EMG1Kurtosis, EMG1Skwness, EMG1RMS, ";
+      csvContent += "EMG2MeanFreq, EMG2Mean, EMG2Median, EMG2StdDev, EMG2Variance, EMG2Kurtosis, EMG2Skwness, EMG2RMS, ";
+      csvContent += "EMG3MeanFreq, EMG3Mean, EMG3Median, EMG3StdDev, EMG3Variance, EMG3Kurtosis, EMG3Skwness, EMG3RMS, ";
+      csvContent += "EMG4MeanFreq, EMG4Mean, EMG4Median, EMG4StdDev, EMG4Variance, EMG4Kurtosis, EMG4Skwness, EMG4RMS, ";
+      csvContent += "EMG5MeanFreq, EMG5Mean, EMG5Median, EMG5StdDev, EMG5Variance, EMG5Kurtosis, EMG5Skwness, EMG5RMS, ";
+      csvContent += "EMG6MeanFreq, EMG6Mean, EMG6Median, EMG6StdDev, EMG6Variance, EMG6Kurtosis, EMG6Skwness, EMG6RMS, ";
+      csvContent += "EMG7MeanFreq, EMG7Mean, EMG7Median, EMG7StdDev, EMG7Variance, EMG7Kurtosis, EMG7Skwness, EMG7RMS, ";
+      csvContent += "EMG8MeanFreq, EMG8Mean, EMG8Median, EMG8StdDev, EMG8Variance, EMG8Kurtosis, EMG8Skwness, EMG8RMS, Force\n";
+      features.forEach(function(infoArray, index){
+         dataString = infoArray.join(",");
+         csvContent += index < features.length ? dataString+ ','+ force[index] +"\n" : dataString;
+
+      }); 
+      
+      var encodedUri = encodeURI(csvContent);
+      var link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", "features.csv");
+      document.body.appendChild(link); // Required for FF
+
+      link.click(); // This will download the data file named "my_data.csv".
+    }
+
+    function train(file, numberOfIterations, windowSize) {
+      var avloss = 0.0;
+      var actualForce = 0;
+      predictedForce = [];
+		
+        for(z = 1; z <= numberOfIterations; z++){
+	  //if (z % 10 == 0) {
+	  //	console.log("Iteration " + z);
+	  //}
+          var trueval  = 0, falseval = 0;
+          traingSetLength = preprocessedData[0].length;
+
+          predictedForce = [];
+
+          for(var i = 0; i < traingSetLength; i++){
+
+            var x = new convnetjs.Vol(+windowSize,8,1, 0.0);
+
+            for ( var idx = 0; idx < +windowSize; idx++){
+            	for (var emgNum = 0; emgNum < 8; emgNum++){
+              		x.set(idx, emgNum, 0, preprocessedData[emgNum][i][idx]);  
+              }
+            }
+            actualForce = force[i];
+            
+            
+			
+            var stats = trainer.train(x, [actualForce]);
+            var predicted_values = net.forward(x);
+
+            if ( Math.round(predicted_values.w[0]) == actualForce ){
+              trueval+= 1;
+	      trainAccWindow.add(1.0);
+	      predictedForce.push(Math.round(predicted_values.w[0]));
+	    }
+            else{
+              falseval+=1;
+	      trainAccWindow.add(0.0);
+	      predictedForce.push(Math.round(predicted_values.w[0]));
+	    }
+            avloss += stats.loss;
+            var lossx = stats.cost_loss;
+            var lossw = stats.l2_decay_loss;
+            xLossWindow.add(lossx);
+            wLossWindow.add(lossw);
+          }
+          totalIterations += 1;
+        }
+
+        avloss /= traingSetLength*numberOfIterations;
+        var t = '';
+        var accper = f2t(trainAccWindow.get_average()) * 100;
+        t += 'Correct Force Output:&nbsp;&nbsp;&nbsp;&nbsp;' + force;
+        t += '<br>'
+        t += 'Predicted Force Output: ' + predictedForce;
+        t += '<br>'    
+        t += 'Training Accuarcy: ' + Math.round(accper) + '%';
+        t += '<br>'
+        t += 'iteration: ' + totalIterations;
+        $("#report").html(t);
+        //console.log('correct = ' + trueval + ', false = ' + falseval);
+
+
+
+	//Add long term stats
+	if(resultQueue.length * noOfIterations >= maxResults) { //Queue exceeded size
+	    resultQueue.shift();
+	} 
+	resultQueue.push(accper);
+    }
+
+    function change_net () {
+	eval($("#newnet").val());
+        $("#start").removeClass("disabled")
+        $("#buttonnn").addClass("disabled")
+    }
+
+  </script>
+</body>
+</html>
