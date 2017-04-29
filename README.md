@@ -1,5 +1,5 @@
 # ConvNetJS-EMG-to-Force
-Implementation of [Stanfords ConvNetJS](1) to calculate relations between EMG signals and the applied force
+Implementation of [Stanfords ConvNetJS](1) to calculate relations between EMG signals of a handsensor and the applied force
 
 ## Input
 This network allows to import data as a csv-seperated file.
